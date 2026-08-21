@@ -1,0 +1,5 @@
+kafka-python-ng==2.2.3
+psycopg[binary]==3.3.4
+python-dotenv==1.0.1
+faker==25.2.0
+rich==13.7.1
