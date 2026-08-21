@@ -8,6 +8,7 @@ import json
 import time
 import sys
 import os
+from datetime import datetime, timezone
 import psycopg
 from psycopg.types.json import Jsonb
 from kafka import KafkaConsumer
@@ -58,18 +59,30 @@ def insert_raw_event(cursor, event):
     )
 
 
-def insert_processed_event(cursor, event):
+def compute_latency_ms(event_timestamp_iso: str) -> float | None:
+    """Compute end-to-end latency in ms between producer send time and now."""
+    try:
+        # Producer sets timestamp as a naive UTC ISO string (datetime.utcnow().isoformat())
+        sent_at = datetime.fromisoformat(event_timestamp_iso).replace(tzinfo=timezone.utc)
+        now_utc = datetime.now(timezone.utc)
+        return round((now_utc - sent_at).total_seconds() * 1000, 3)
+    except Exception:
+        return None
+
+
+def insert_processed_event(cursor, event, latency_ms: float | None):
     amount = event["payload"].get("amount", 0.0)
     cursor.execute(
         """
-        INSERT INTO processed_events (event_id, user_id, event_type, amount, status)
-        VALUES (%s, %s, %s, %s, 'processed')
+        INSERT INTO processed_events (event_id, user_id, event_type, amount, status, latency_ms)
+        VALUES (%s, %s, %s, %s, 'processed', %s)
         """,
         (
             event["event_id"],
             event["user_id"],
             event["event_type"],
             amount,
+            latency_ms,
         ),
     )
 
@@ -136,11 +149,14 @@ def main():
         for message in consumer:
             event = message.value
             try:
+                # Measure latency BEFORE any processing so the clock is as accurate as possible
+                latency_ms = compute_latency_ms(event.get("timestamp", ""))
+
                 event = process_event(event)
                 cursor = db_conn.cursor()
 
                 insert_raw_event(cursor, event)
-                insert_processed_event(cursor, event)
+                insert_processed_event(cursor, event, latency_ms)
                 update_raw_event_processed(cursor, event["event_id"])
 
                 if stats["consumed"] % 10 == 0:
@@ -154,11 +170,13 @@ def main():
                     stats["high_value"] += 1
 
                 flag = " $$$ HIGH VALUE" if event["is_high_value"] else ""
+                lat_str = f" lat=[white]{latency_ms:.1f}ms[/white]" if latency_ms is not None else ""
                 console.print(
                     f"[blue]<< RECV[/blue] "
                     f"[cyan]{event['event_type']:12}[/cyan] "
                     f"user=[yellow]{event['user_id']}[/yellow] "
                     f"amount=[magenta]${event['payload'].get('amount', 0):.2f}[/magenta]"
+                    f"{lat_str}"
                     f"[bold green]{flag}[/bold green] "
                     f"[dim]p={message.partition} off={message.offset}[/dim]"
                 )
