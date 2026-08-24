@@ -47,22 +47,23 @@ HIGH_VALUE_THRESHOLD    = float(os.getenv("HIGH_VALUE_THRESHOLD", "200.0"))
 DLQ_PATH                = Path(os.getenv("DLQ_PATH", "dlq.jsonl"))
 
 try:
-    from utils import SCHEMA_VERSION  # type: ignore[import]
+    from utils import SCHEMA_VERSION, get_db_config  # type: ignore[import]
 except ImportError:
     SCHEMA_VERSION = "1.2.0"
-
-DB_CONFIG = {
-    "host":     os.getenv("DB_HOST",     "localhost"),
-    "port":     int(os.getenv("DB_PORT", "5432")),
-    "dbname":   os.getenv("DB_NAME",     "pipeline_db"),
-    "user":     os.getenv("DB_USER",     "pipeline_user"),
-    "password": os.getenv("DB_PASSWORD", "pipeline_pass"),
-}
+    import os as _os
+    def get_db_config() -> dict:  # type: ignore[misc]
+        return {
+            "host":     _os.getenv("DB_HOST",     "localhost"),
+            "port":     int(_os.getenv("DB_PORT", "5432")),
+            "dbname":   _os.getenv("DB_NAME",     "pipeline_db"),
+            "user":     _os.getenv("DB_USER",     "pipeline_user"),
+            "password": _os.getenv("DB_PASSWORD", "pipeline_pass"),
+        }
 
 
 # --- Database ---
 def get_db_connection():
-    conn = psycopg.connect(**DB_CONFIG)
+    conn = psycopg.connect(**get_db_config())
     conn.autocommit = False
     return conn
 

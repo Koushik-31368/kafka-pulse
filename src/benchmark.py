@@ -37,13 +37,18 @@ if sys.platform == "win32":
 load_dotenv()
 console = Console(highlight=False)
 
-DB_CONFIG = {
-    "host":     os.getenv("DB_HOST",     "localhost"),
-    "port":     int(os.getenv("DB_PORT", "5432")),
-    "dbname":   os.getenv("DB_NAME",     "pipeline_db"),
-    "user":     os.getenv("DB_USER",     "pipeline_user"),
-    "password": os.getenv("DB_PASSWORD", "pipeline_pass"),
-}
+try:
+    from utils import get_db_config  # type: ignore[import]
+except ImportError:
+    import os as _os
+    def get_db_config() -> dict:  # type: ignore[misc]
+        return {
+            "host":     _os.getenv("DB_HOST",     "localhost"),
+            "port":     int(_os.getenv("DB_PORT", "5432")),
+            "dbname":   _os.getenv("DB_NAME",     "pipeline_db"),
+            "user":     _os.getenv("DB_USER",     "pipeline_user"),
+            "password": _os.getenv("DB_PASSWORD", "pipeline_pass"),
+        }
 
 
 def wait_for_batch(conn, batch_id: str, expected: int, timeout: int = 120) -> int:
@@ -152,7 +157,7 @@ def main():
     console.print(f"   Batch ID: [yellow]{args.batch_id}[/yellow]\n")
 
     try:
-        conn = psycopg.connect(**DB_CONFIG)
+        conn = psycopg.connect(**get_db_config())
     except Exception as e:
         console.print(f"[red][FAIL] Cannot connect to PostgreSQL: {e}[/red]")
         return
