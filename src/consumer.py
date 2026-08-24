@@ -31,8 +31,8 @@ from dotenv import load_dotenv
 
 # Force UTF-8 output on Windows
 if sys.platform == "win32":
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
 
 load_dotenv()
 
@@ -222,7 +222,7 @@ def main():
             KAFKA_TOPIC,
             bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
             group_id=CONSUMER_GROUP,
-            value_deserializer=lambda m: json.loads(m.decode("utf-8")),
+            value_deserializer=lambda m: json.loads(m.decode("utf-8")) if m is not None else {},  # type: ignore[union-attr]
             auto_offset_reset="earliest",
             enable_auto_commit=True,
             auto_commit_interval_ms=1000,
