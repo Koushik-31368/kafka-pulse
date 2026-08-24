@@ -112,8 +112,12 @@ def generate_event(burst_batch_id: str | None = None) -> dict:
     }
 
 
-def on_send_error(excp):
-    console.print(f"[red]SEND ERROR: {excp}[/red]")
+def _make_error_cb(counter: list[int]):
+    """Return a Kafka send-errback that logs and increments *counter[0]*."""
+    def _cb(excp):
+        counter[0] += 1
+        console.print(f"[red]SEND ERROR: {excp}[/red]")
+    return _cb
 
 
 # --- Burst Mode ---
@@ -126,7 +130,8 @@ def burst_mode(producer: KafkaProducer, n: int) -> tuple[str, int, float]:
     )
     console.print("[dim]No sleep between sends. Timing starts now...[/dim]\n")
 
-    errors = 0
+    error_count: list[int] = [0]
+    on_err = _make_error_cb(error_count)
     t_start = time.perf_counter()
     report_every = max(1, n // 10)
 
@@ -136,7 +141,7 @@ def burst_mode(producer: KafkaProducer, n: int) -> tuple[str, int, float]:
             KAFKA_TOPIC,
             key=str(event["user_id"]),
             value=event,
-        ).add_errback(on_send_error)
+        ).add_errback(on_err)
 
         if (i + 1) % report_every == 0:
             pct = (i + 1) / n * 100
@@ -157,7 +162,7 @@ def burst_mode(producer: KafkaProducer, n: int) -> tuple[str, int, float]:
   Messages sent : [green]{n:,}[/green]
   Elapsed       : [yellow]{elapsed:.3f}s[/yellow]
   Throughput    : [bold magenta]{eps:.1f} events/sec[/bold magenta] (producer side)
-  Errors        : [red]{errors}[/red]
+  Errors        : [red]{error_count[0]}[/red]
   Batch ID      : [dim]{batch_id}[/dim]
 
 [dim]Now wait for the consumer to drain, then run:[/dim]
@@ -169,8 +174,10 @@ def burst_mode(producer: KafkaProducer, n: int) -> tuple[str, int, float]:
 # --- Continuous Mode ---
 def continuous_mode(producer: KafkaProducer, interval: float, max_count: int | None):
     """Normal continuous produce loop with rolling throughput display."""
-    stats = {"sent": 0, "errors": 0}
-    # Rolling window: (timestamp, count) tuples over 10 s
+    error_count: list[int] = [0]
+    on_err = _make_error_cb(error_count)
+    stats = {"sent": 0}
+    # Rolling window: timestamps over 10 s
     rolling: deque[float] = deque()
     t_start = time.perf_counter()
 
@@ -195,7 +202,7 @@ def continuous_mode(producer: KafkaProducer, interval: float, max_count: int | N
                 KAFKA_TOPIC,
                 key=str(event["user_id"]),
                 value=event,
-            ).add_errback(on_send_error)
+            ).add_errback(on_err)
 
             stats["sent"] += 1
             rolling.append(t_sent)
@@ -222,7 +229,7 @@ def continuous_mode(producer: KafkaProducer, interval: float, max_count: int | N
         console.print(
             Panel(
                 f"[green]Sent    :[/green] {stats['sent']:,}\n"
-                f"[red]Errors  :[/red] {stats['errors']}\n"
+                f"[red]Errors  :[/red] {error_count[0]}\n"
                 f"[yellow]Elapsed :[/yellow] {elapsed:.1f}s\n"
                 f"[cyan]Avg EPS :[/cyan] {avg_eps:.1f} ev/s",
                 title="[bold]Producer Stopped[/bold]",
