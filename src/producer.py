@@ -31,13 +31,12 @@ from kafka import KafkaProducer
 from faker import Faker
 from rich.console import Console
 from rich.panel import Panel
-from rich.table import Table
 from dotenv import load_dotenv
 
 # Force UTF-8 output on Windows
 if sys.platform == "win32":
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
 
 load_dotenv()
 

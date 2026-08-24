@@ -11,8 +11,8 @@ from datetime import datetime, timezone
 
 # Force UTF-8 on Windows
 if sys.platform == "win32":
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
 
 from dotenv import load_dotenv
 from rich.console import Console
@@ -27,10 +27,21 @@ KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "user-events")
 
 
+def _get_db_config() -> dict:
+    """Build DB config from environment (local copy avoids circular import issues)."""
+    return {
+        "host":     os.getenv("DB_HOST",     "localhost"),
+        "port":     int(os.getenv("DB_PORT", "5432")),
+        "dbname":   os.getenv("DB_NAME",     "pipeline_db"),
+        "user":     os.getenv("DB_USER",     "pipeline_user"),
+        "password": os.getenv("DB_PASSWORD", "pipeline_pass"),
+    }
+
+
 def check_kafka() -> tuple[bool, str, float]:
     """Try to create a KafkaProducer and ping the broker. Returns (ok, detail, latency_ms)."""
-    from kafka import KafkaProducer
-    import kafka.errors as kerrors
+    from kafka import KafkaProducer  # type: ignore[import-untyped]
+    import kafka.errors as kerrors   # type: ignore[import-untyped]
 
     t0 = time.perf_counter()
     try:
@@ -55,24 +66,21 @@ def check_kafka() -> tuple[bool, str, float]:
 def check_postgres() -> tuple[bool, str, float]:
     """Try to connect to PostgreSQL and run a ping query. Returns (ok, detail, latency_ms)."""
     import psycopg
-    from src.utils import get_db_config  # type: ignore[import]
 
-    try:
-        from utils import get_db_config  # running from project root
-    except ImportError:
-        from src.utils import get_db_config
-
-    cfg = get_db_config()
+    cfg = _get_db_config()
     t0 = time.perf_counter()
     try:
         conn = psycopg.connect(**cfg, connect_timeout=5)
         with conn.cursor() as cur:
             cur.execute("SELECT version(), current_database(), pg_postmaster_start_time()")
-            ver, db, started = cur.fetchone()
+            row = cur.fetchone()
         conn.close()
         elapsed = (time.perf_counter() - t0) * 1000
-        started_str = started.strftime("%Y-%m-%d %H:%M:%S UTC") if started else "unknown"
-        return True, f"DB='{db}' | {ver.split(',')[0]} | up since {started_str}", round(elapsed, 1)
+        if row:
+            ver, db, started = row
+            started_str = started.strftime("%Y-%m-%d %H:%M:%S UTC") if started else "unknown"
+            return True, f"DB='{db}' | {str(ver).split(',')[0]} | up since {started_str}", round(elapsed, 1)
+        return True, "Connected (no version info)", round(elapsed, 1)
     except psycopg.OperationalError as exc:
         elapsed = (time.perf_counter() - t0) * 1000
         return False, str(exc).strip(), round(elapsed, 1)
@@ -82,20 +90,17 @@ def check_db_tables() -> tuple[bool, str, float]:
     """Verify that the expected pipeline tables exist and return row counts."""
     import psycopg
 
-    try:
-        from utils import get_db_connection
-    except ImportError:
-        from src.utils import get_db_connection
-
     EXPECTED_TABLES = ["raw_events", "processed_events", "pipeline_metrics"]
+    cfg = _get_db_config()
     t0 = time.perf_counter()
     try:
-        conn = get_db_connection()
-        counts = {}
+        conn = psycopg.connect(**cfg)
+        counts: dict[str, int] = {}
         with conn.cursor() as cur:
             for tbl in EXPECTED_TABLES:
                 cur.execute(f"SELECT COUNT(*) FROM {tbl}")  # noqa: S608
-                counts[tbl] = cur.fetchone()[0]
+                result = cur.fetchone()
+                counts[tbl] = result[0] if result else 0
         conn.close()
         elapsed = (time.perf_counter() - t0) * 1000
         summary = "  ".join(f"{t}={c:,}" for t, c in counts.items())
@@ -105,7 +110,7 @@ def check_db_tables() -> tuple[bool, str, float]:
         return False, str(exc).strip(), round(elapsed, 1)
 
 
-def main():
+def main() -> None:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     console.print(f"\n[bold cyan]*** KAFKA-PULSE HEALTH CHECK ***[/bold cyan]  [dim]{now}[/dim]\n")
 
