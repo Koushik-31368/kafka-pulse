@@ -1,4 +1,4 @@
-# Real-Time Kafka Pipeline
+# Real-Time Kafka Pipeline  [![version](https://img.shields.io/badge/version-1.2.0-blue)](CHANGELOG.md)
 
 A fully local, production-style data pipeline using **Apache Kafka**, **PostgreSQL**, and **Python** — no cloud accounts, no costs.
 
@@ -6,25 +6,31 @@ A fully local, production-style data pipeline using **Apache Kafka**, **PostgreS
 
 ```
 [Python Producer] --> [Kafka Topic: user-events] --> [Python Consumer] --> [PostgreSQL]
-                                                                                |
-                                                                      [Monitor Dashboard]
+       |                                                     |                   |
+  --rate / --burst                               Batched commits (20/tx)   [Monitor Dashboard]
+  --count / --schema                             DLQ (dlq.jsonl)           [Benchmark Reporter]
+                                                 Auto-reconnect            [Health Check]
 ```
 
 ## Project Structure
 
 ```
 realtime-kafka-pipeline/
-|-- docker-compose.yml           # Kafka + PostgreSQL stack
-|-- .env.example                 # Configuration template (copy to .env)
-|-- requirements.txt             # Python dependencies
-|-- sql/
-|   |-- init.sql                 # DB schema (auto-applied on first run)
-|   |-- add_latency_ms.sql       # Migration: adds latency_ms column
-|-- src/
-    |-- producer.py              # Generates fake events -> Kafka (+ --burst mode)
-    |-- consumer.py              # Reads Kafka -> stores in PostgreSQL (measures latency)
-    |-- monitor.py               # Live terminal dashboard
-    |-- benchmark.py             # Burst benchmark reporter (p50/p95/p99 latency)
+├── docker-compose.yml           # Kafka + PostgreSQL stack
+├── .env.example                 # Configuration template (copy to .env)
+├── requirements.txt             # Python dependencies
+├── CHANGELOG.md                 # Version history
+├── sql/
+│   ├── init.sql                 # DB schema (auto-applied on first run)
+│   ├── add_latency_ms.sql       # Migration v1.1: adds latency_ms column
+│   └── add_schema_version.sql   # Migration v1.2: schema version + indexes
+└── src/
+    ├── utils.py                 # Shared: DB helpers, retry decorator, formatters
+    ├── producer.py              # Generates fake events -> Kafka (--rate / --burst / --count)
+    ├── consumer.py              # Reads Kafka -> PostgreSQL (batched, DLQ, auto-reconnect)
+    ├── monitor.py               # Live terminal dashboard (latency + rate panels)
+    ├── benchmark.py             # Burst benchmark reporter (p25/p50/p95/p99 + JSON export)
+    └── health_check.py          # Infrastructure health check (Kafka + PostgreSQL)
 ```
 
 ## Quick Start
@@ -63,46 +69,78 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 5. Run the pipeline (3 separate terminals)
+### 5. (Optional) Run a health check
 
-**Terminal 1 - Producer** (generates fake e-commerce events and sends to Kafka):
+Verify that Kafka and PostgreSQL are reachable before starting the pipeline:
+
+```bash
+python src/health_check.py
+```
+
+Expected output:
+
+```
+*** KAFKA-PULSE HEALTH CHECK ***  2026-08-24 17:28:00 UTC
+
+┌─────────────────┬────────┬────────────┬────────────────────────────────┐
+│ Component       │ Status │    Latency │ Detail                         │
+├─────────────────┼────────┼────────────┼────────────────────────────────┤
+│ Kafka Broker    │ PASS   │    23.4 ms │ Broker reachable. Topic ...    │
+│ PostgreSQL      │ PASS   │     4.1 ms │ DB='pipeline_db' | PostgreSQL  │
+│ DB Tables       │ PASS   │     1.8 ms │ raw_events=0  processed_...    │
+└─────────────────┴────────┴────────────┴────────────────────────────────┘
+All systems operational.
+```
+
+### 6. Apply migrations (run once)
+
+```bash
+# Windows PowerShell
+Get-Content sql\add_latency_ms.sql    | docker exec -i postgres psql -U pipeline_user -d pipeline_db
+Get-Content sql\add_schema_version.sql | docker exec -i postgres psql -U pipeline_user -d pipeline_db
+```
+
+### 7. Run the pipeline (3 separate terminals)
+
+**Terminal 1 – Producer** (default: 1 event/sec):
 ```bash
 venv\Scripts\activate
 python src/producer.py
+
+# Or set a custom rate:
+python src/producer.py --rate 5        # 5 events/sec
+python src/producer.py --count 200     # stop after 200 events
 ```
 
-**Terminal 2 - Consumer** (reads from Kafka and saves to PostgreSQL):
+**Terminal 2 – Consumer** (batched commits, dead-letter queue):
 ```bash
 venv\Scripts\activate
 python src/consumer.py
 ```
 
-**Terminal 3 - Monitor** (live terminal dashboard):
+**Terminal 3 – Monitor** (live latency + rate dashboard):
 ```bash
 venv\Scripts\activate
 python src/monitor.py
 ```
 
-### 6. Run a burst throughput benchmark (optional)
-
-Apply the latency migration once, then fire a burst and report real percentiles:
+### 8. Run a burst throughput benchmark (optional)
 
 ```bash
-# 1. Apply migration (one-time, safe to re-run)
-Get-Content sql\add_latency_ms.sql | docker exec -i postgres psql -U pipeline_user -d pipeline_db
+# 1. Start the consumer (Terminal 2 above)
 
-# 2. Start the consumer (Terminal 2 above)
-
-# 3. Fire 5000 messages with no sleep — copy the batch_id from the output
+# 2. Fire 5000 messages with no sleep — copy batch_id + eps from output
 python src/producer.py --burst 5000
 
-# 4. Once the consumer drains, report p50/p95/p99 latency + throughput
-python src/benchmark.py --batch-id <batch_id_from_step_3> --expected 5000 --produced-eps <eps_from_step_3>
+# 3. Once consumer drains, report p25/p50/p95/p99 latency + throughput
+python src/benchmark.py \
+    --batch-id <batch_id_from_step_2> \
+    --expected 5000 \
+    --produced-eps <eps_from_step_2>
+
+# 4. Optionally export results as JSON for CI/CD
+python src/benchmark.py --batch-id <id> --out results.json
 ```
-
-
-
-Navigate to **http://localhost:8081** in your browser to see topics, partitions, and live messages.
 
 ## Stop Everything
 
@@ -113,74 +151,97 @@ docker-compose down -v     # stop containers and delete all data
 
 ## Port Reference
 
-| Service      | Host Port | Notes                               |
-|--------------|-----------|-------------------------------------|
-| Kafka        | 9092      | Used by Python producer and consumer |
-| Kafka UI     | 8081      | Web dashboard (browser)             |
-| PostgreSQL   | 5433      | Mapped from 5432 inside container   |
-| Zookeeper    | 2181      | Internal Kafka coordination         |
+| Service      | Host Port | Notes                                 |
+|--------------|-----------|---------------------------------------|
+| Kafka        | 9092      | Used by Python producer and consumer  |
+| Kafka UI     | 8081      | Web dashboard — http://localhost:8081 |
+| PostgreSQL   | 5433      | Mapped from 5432 inside container     |
+| Zookeeper    | 2181      | Internal Kafka coordination           |
 
 ## Database Tables
 
-| Table              | Description                            |
-|--------------------|----------------------------------------|
-| raw_events         | Every event received from Kafka        |
-| processed_events   | Transformed events with business logic |
-| pipeline_metrics   | Periodic counters for monitoring       |
-| event_summary      | View: quick aggregation by event type  |
+| Table              | Description                                      |
+|--------------------|--------------------------------------------------|
+| `raw_events`       | Every event received from Kafka                  |
+| `processed_events` | Transformed events with business logic + latency |
+| `pipeline_metrics` | Periodic counters + schema version tags          |
+| `event_summary`    | View: quick aggregation by event type            |
 
 ## Configuration
 
 Copy `.env.example` to `.env` and edit as needed:
 
-| Variable                   | Default              | Description                        |
-|----------------------------|----------------------|------------------------------------|
-| KAFKA_BOOTSTRAP_SERVERS    | localhost:9092       | Kafka broker address               |
-| KAFKA_TOPIC                | user-events          | Topic name                         |
-| DB_HOST                    | localhost            | PostgreSQL host                    |
-| DB_PORT                    | 5433                 | PostgreSQL port (Docker host port) |
-| DB_NAME                    | pipeline_db          | Database name                      |
-| DB_USER                    | pipeline_user        | Database user                      |
-| DB_PASSWORD                | pipeline_pass        | Database password                  |
-| PRODUCER_INTERVAL_SECONDS  | 1                    | Seconds between generated events   |
+| Variable                   | Default              | Description                                       |
+|----------------------------|----------------------|---------------------------------------------------|
+| `KAFKA_BOOTSTRAP_SERVERS`  | `localhost:9092`     | Kafka broker address                              |
+| `KAFKA_TOPIC`              | `user-events`        | Topic name                                        |
+| `DB_HOST`                  | `localhost`          | PostgreSQL host                                   |
+| `DB_PORT`                  | `5433`               | PostgreSQL port (Docker host port)                |
+| `DB_NAME`                  | `pipeline_db`        | Database name                                     |
+| `DB_USER`                  | `pipeline_user`      | Database user                                     |
+| `DB_PASSWORD`              | `pipeline_pass`      | Database password                                 |
+| `PRODUCER_INTERVAL_SECONDS`| `1`                  | Default seconds between events (overridden by `--rate`) |
+| `CONSUMER_BATCH_SIZE`      | `20`                 | Events per DB transaction in consumer             |
+| `HIGH_VALUE_THRESHOLD`     | `200.0`              | Amount (USD) above which an event is "high value" |
+| `DLQ_PATH`                 | `dlq.jsonl`          | Path to dead-letter queue file                    |
+| `MONITOR_REFRESH_SECONDS`  | `3`                  | Monitor dashboard refresh interval                |
 
 ## Tech Stack
 
 - **Apache Kafka** — distributed event streaming platform
 - **Apache Zookeeper** — Kafka cluster coordination
 - **PostgreSQL** — relational database for storing events
-- **Python** — producer, consumer, and monitor scripts
+- **Python 3.11+** — producer, consumer, monitor, benchmark, health-check
 - **kafka-python-ng** — Python Kafka client
-- **psycopg** — Python PostgreSQL adapter
+- **psycopg 3** — Python PostgreSQL adapter
 - **Rich** — terminal formatting and live dashboard
 - **Faker** — realistic fake event data generation
 - **Docker Compose** — local container orchestration
 
 ## How It Works
 
-1. The **producer** generates fake e-commerce events (purchases, page views, logins, etc.) every second using Faker and publishes them to the `user-events` Kafka topic.
-2. The **consumer** reads from that topic, applies business logic (flags transactions over $200 as high-value), then writes both raw and processed records to PostgreSQL inside a transaction. It computes `latency_ms` — the delta between the producer's send timestamp and the DB insert time — and stores it in `processed_events`.
-3. The **monitor** queries PostgreSQL every 3 seconds and renders a live dashboard showing total events, processing lag, and a breakdown by event type.
+1. The **producer** generates realistic e-commerce events (purchases, page views, logins, etc.) using Faker.  
+   Events carry a `schema_version` field and a rich payload including `country`, `device_type`, `currency`, `discount_pct`, and `final_amount`.  
+   Use `--rate` to control throughput or `--burst N` for a max-speed benchmark.
+
+2. The **consumer** reads from Kafka and groups events into batches of `CONSUMER_BATCH_SIZE` (default 20) before committing to PostgreSQL — dramatically reducing per-event overhead.  
+   Failed events are written to a **dead-letter queue** (`dlq.jsonl`) instead of being dropped.  
+   The consumer automatically reconnects to PostgreSQL with exponential back-off on transient failures.
+
+3. The **monitor** queries PostgreSQL every 3 seconds and renders three live panels:
+   - **Pipeline Status**: raw/processed counts, lag, high-value events, 30-second rolling rate, DLQ size
+   - **Latency (last 1k)**: p50/p95/p99/min/max/mean computed over the last 1000 processed events
+   - **Events by Type**: count, average amount, and max amount per event type
+
+4. The **health check** verifies Kafka and PostgreSQL connectivity before the pipeline starts,  
+   printing a rich table with latency for each component. Returns exit code 1 on failure (CI-friendly).
 
 ## Benchmark Results
 
-Measured locally on a single machine with Docker Compose (no cloud, no external network hops).  
-Run: `python src/producer.py --burst 5000`, then `python src/benchmark.py --batch-id <id> --expected 5000`.
+Measured locally on a single machine with Docker Compose (no cloud, no external network hops).
+
+### v1.1 baseline (single-event commits)
 
 | Metric | Value | Notes |
 |---|---|---|
-| **Producer throughput** | **2,619 events/sec** | 5000 messages sent + acked with no sleep |
-| **Consumer throughput** | **108 events/sec** | Synchronous per-event DB commits, no batching |
-| **Min end-to-end latency** | **46 ms** | First message — true Kafka transit + DB insert time |
-| **p50 latency under burst** | **22.1 s** | Queue-wait dominant — see note below |
-| **p99 latency under burst** | **44.1 s** | Queue-wait dominant — see note below |
+| **Producer throughput** | **2,619 ev/s** | 5000 msgs sent + acked, no sleep |
+| **Consumer throughput** | **108 ev/s** | Per-event DB commits |
+| **Min end-to-end latency** | **46 ms** | No queue wait |
+| **p50 latency under burst** | **22.1 s** | Queue-drain dominant |
+| **p99 latency under burst** | **44.1 s** | Queue-drain dominant |
 
-**What the p50/p99 numbers actually mean:**  
-The producer can send 2,619 messages/sec; the consumer can only drain 108/sec. Under a 5000-message burst, messages queue up in Kafka and the `latency_ms` measurement (producer send time → DB insert time) grows linearly as each message waits its turn. The p50 of 22 seconds is not transport latency — it's the **queue-drain time for the 2,500th message**. The 46ms minimum is the honest Kafka+PostgreSQL transport figure for a message that sees no queue wait.
+### v1.2 improvement (batched commits, batch=20)
 
-This is a correct and expected result: it faithfully captures a real architectural bottleneck (synchronous per-event commits), not a measurement error.
+Batching 20 events per transaction is expected to push consumer throughput toward **2,000+ ev/s**, collapsing p50 burst latency from ~22 s to the **~50 ms** range seen at minimum latency. Re-run the benchmark to capture your results.
 
 ## Known Limitations / Next Steps
 
-- **Consumer batching** is the fix to close the throughput gap. Batching 50–100 events per DB transaction would push consumer throughput into the 2,000+ events/sec range, collapsing p50 latency from ~22s to the same ~50ms range as the minimum. This is documented here as a known next step rather than implemented under time pressure with the current single-event-commit design.
-- The ML/anomaly-detection layer (real-time fraud scoring) remains **future work** — the pipeline is intentionally kept clean of sklearn/ML dependencies so the benchmark reflects pure infrastructure performance.
+- **Consumer batching** is now implemented (v1.2) with a default batch size of 20. Increase `CONSUMER_BATCH_SIZE` to push throughput further.
+- **DLQ replay**: a `dlq_replay.py` script to re-ingest dead-letter events is planned as a next step.
+- **ML/anomaly-detection** (real-time fraud scoring) remains future work — the pipeline is intentionally kept free of ML dependencies so the benchmark reflects pure infrastructure performance.
+- **Multi-partition topics**: the current setup uses a single-partition topic. Scaling to multiple partitions with multiple consumer instances is a documented next step.
+
+## See Also
+
+- [CHANGELOG.md](CHANGELOG.md) — full version history
+- [Kafka UI](http://localhost:8081) — live topic browser (when Docker is running)
