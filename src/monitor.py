@@ -58,7 +58,10 @@ def get_stats(conn):
         cur.execute("SELECT COUNT(*) FROM processed_events")
         total_processed = cur.fetchone()[0]
 
-        cur.execute(f"SELECT COUNT(*) FROM processed_events WHERE amount > {HIGH_VALUE_THRESHOLD}")
+        cur.execute(
+            "SELECT COUNT(*) FROM processed_events WHERE amount > %s",
+            (HIGH_VALUE_THRESHOLD,),
+        )
         high_value = cur.fetchone()[0]
 
         # Per-type breakdown
