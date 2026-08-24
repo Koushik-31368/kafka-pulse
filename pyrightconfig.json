@@ -1,0 +1,11 @@
+{
+  "pythonVersion": "3.11",
+  "pythonPlatform": "Windows",
+  "venvPath": ".",
+  "venv": "venv311",
+  "include": ["src", "sql"],
+  "exclude": ["venv", "venv311", ".git"],
+  "typeCheckingMode": "basic",
+  "reportMissingImports": "warning",
+  "reportMissingModuleSource": "none"
+}
