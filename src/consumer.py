@@ -287,10 +287,28 @@ def main():
                         db_reconnect_attempts += 1
                         db_conn = reconnect_db(db_conn, db_reconnect_attempts)
                         # retry the same batch once after reconnect
-                        n = flush_batch(db_conn, pending_batch)
-                        stats["consumed"] += n
-                        stats["batches"] += 1
-                        pending_batch.clear()
+                        try:
+                            n = flush_batch(db_conn, pending_batch)
+                            stats["consumed"] += n
+                            stats["batches"] += 1
+                            pending_batch.clear()
+                        except psycopg.OperationalError as retry_exc:
+                            # Second failure: write every event in the batch to the DLQ
+                            # so nothing is silently lost.
+                            lost = len(pending_batch)
+                            err_msg = str(retry_exc)
+                            console.print(
+                                f"[bold red][DLQ] Retry flush failed — "
+                                f"writing {lost} events to DLQ: {err_msg}[/bold red]"
+                            )
+                            for dlq_event, _ in pending_batch:
+                                write_to_dlq(dlq_event, f"batch retry failed: {err_msg}")
+                            stats["errors"] += lost
+                            pending_batch.clear()
+                            try:
+                                db_conn.rollback()
+                            except Exception:
+                                pass
 
             except Exception as e:
                 stats["errors"] += 1
